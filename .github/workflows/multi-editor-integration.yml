@@ -1,0 +1,250 @@
+name: Multi-Editor Integration Workflow
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  repository_dispatch:
+    types: [replit-event, cursor-event]
+  schedule:
+    # Run synchronization every 6 hours
+    - cron: '0 */6 * * *'
+
+jobs:
+  process_events:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+          
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Set Repository Variables
+        id: repo_vars
+        run: |
+          if [[ "${{ github.repository }}" == "fisapool/repo1" ]]; then
+            echo "primary_repo=fisapool/repo1" >> $GITHUB_OUTPUT
+            echo "secondary_repo=akhirabakar/repo1" >> $GITHUB_OUTPUT
+          else
+            echo "primary_repo=akhirabakar/repo1" >> $GITHUB_OUTPUT
+            echo "secondary_repo=fisapool/repo1" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Process Replit Events
+        if: github.event_name == 'repository_dispatch' && github.event.client_payload.source == 'replit'
+        env:
+          EVENT_DATA: ${{ toJson(github.event.client_payload) }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Processing Replit event: ${{ github.event.client_payload.event }}"
+          echo "Workspace: ${{ github.event.client_payload.workspace.id }}"
+          echo "Primary Repository: ${{ steps.repo_vars.outputs.primary_repo }}"
+          echo "Secondary Repository: ${{ steps.repo_vars.outputs.secondary_repo }}"
+          
+          # Log the event to a history file
+          EVENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          mkdir -p ./logs
+          echo "$EVENT_TIME - Replit - ${{ github.event.client_payload.event }} - ${{ github.event.client_payload.workspace.id }}" >> ./logs/integration-events.log
+          
+          # Handle different Replit event types
+          case "${{ github.event.client_payload.event }}" in
+            "deploy")
+              echo "Handling deployment event from Replit"
+              # Update Cursor with the latest changes
+              node -e "
+                const fs = require('fs');
+                const data = JSON.parse(process.env.EVENT_DATA);
+                fs.writeFileSync('./replit-event-data.json', JSON.stringify(data, null, 2));
+                console.log('Event data saved for cursor integration');
+              "
+              ;;
+            "run")
+              echo "Handling run event from Replit"
+              # Log that a run has occurred in Replit
+              ;;
+            "debug")
+              echo "Handling debug event from Replit"
+              # Log that a debug session has been started in Replit
+              ;;
+            *)
+              echo "Unhandled Replit event type: ${{ github.event.client_payload.event }}"
+              ;;
+          esac
+          
+          # Commit the logs
+          git config --global user.name "GitHub Action Bot"
+          git config --global user.email "action@github.com"
+          git add ./logs/integration-events.log
+          git add ./replit-event-data.json || true
+          git commit -m "Log Replit event: ${{ github.event.client_payload.event }}" || echo "No changes to commit"
+          git push || echo "Could not push changes"
+          
+      - name: Process Cursor AI Events
+        if: github.event_name == 'repository_dispatch' && github.event.client_payload.source == 'cursor'
+        env:
+          EVENT_DATA: ${{ toJson(github.event.client_payload) }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Processing Cursor AI event: ${{ github.event.client_payload.event }}"
+          echo "Project: ${{ github.event.client_payload.project }}"
+          echo "Primary Repository: ${{ steps.repo_vars.outputs.primary_repo }}"
+          echo "Secondary Repository: ${{ steps.repo_vars.outputs.secondary_repo }}"
+          
+          # Log the event to a history file
+          EVENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          mkdir -p ./logs
+          echo "$EVENT_TIME - Cursor - ${{ github.event.client_payload.event }} - ${{ github.event.client_payload.project }}" >> ./logs/integration-events.log
+          
+          # Handle different Cursor event types
+          case "${{ github.event.client_payload.event }}" in
+            "edit")
+              echo "Handling edit event from Cursor"
+              # Update Replit with the latest changes
+              node -e "
+                const fs = require('fs');
+                const data = JSON.parse(process.env.EVENT_DATA);
+                fs.writeFileSync('./cursor-event-data.json', JSON.stringify(data, null, 2));
+                console.log('Event data saved for replit integration');
+              "
+              ;;
+            "generate")
+              echo "Handling AI code generation event from Cursor"
+              # Log that code has been generated with Cursor AI
+              ;;
+            *)
+              echo "Unhandled Cursor event type: ${{ github.event.client_payload.event }}"
+              ;;
+          esac
+          
+          # Commit the logs
+          git config --global user.name "GitHub Action Bot"
+          git config --global user.email "action@github.com"
+          git add ./logs/integration-events.log
+          git add ./cursor-event-data.json || true
+          git commit -m "Log Cursor event: ${{ github.event.client_payload.event }}" || echo "No changes to commit"
+          git push || echo "Could not push changes"
+          
+      - name: Scheduled Synchronization
+        if: github.event_name == 'schedule'
+        run: |
+          echo "Running scheduled synchronization between Replit and Cursor AI environments"
+          echo "Primary Repository: ${{ steps.repo_vars.outputs.primary_repo }}"
+          echo "Secondary Repository: ${{ steps.repo_vars.outputs.secondary_repo }}"
+          
+          # Create logs directory if it doesn't exist
+          mkdir -p ./logs
+          
+          # Record the synchronization in the logs
+          EVENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "$EVENT_TIME - Scheduled sync" >> ./logs/integration-events.log
+          
+          # Perform health check on both environments
+          REPLIT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/api/replit-events/test || echo "Error")
+          CURSOR_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8347/health || echo "Error")
+          
+          echo "Replit health check status: $REPLIT_STATUS"
+          echo "Cursor health check status: $CURSOR_STATUS"
+          
+          # Check last modified timestamps for both environments
+          echo "Last Replit Event:" 
+          cat ./logs/integration-events.log | grep "Replit" | tail -1 || echo "No Replit events found"
+          
+          echo "Last Cursor Event:"
+          cat ./logs/integration-events.log | grep "Cursor" | tail -1 || echo "No Cursor events found"
+          
+  deploy_components:
+    needs: process_events
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Configure environment
+        run: |
+          echo "Setting up environment variables for deployment"
+          # Create a .env file from secrets
+          echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" > .env
+          echo "REPLIT_API_KEY=${{ secrets.REPLIT_API_KEY }}" >> .env
+          echo "CURSOR_AI_API_KEY=${{ secrets.CURSOR_AI_API_KEY }}" >> .env
+          echo "NGROK_AUTH_TOKEN=${{ secrets.NGROK_AUTH_TOKEN }}" >> .env
+          
+          # Add workspace IDs and project IDs
+          echo "REPLIT_WORKSPACE_IDS=${{ secrets.REPLIT_WORKSPACE_IDS }}" >> .env
+          echo "CURSOR_AI_PROJECT_IDS=${{ secrets.CURSOR_AI_PROJECT_IDS }}" >> .env
+          
+          # Set deployment-specific variables
+          echo "NODE_ENV=production" >> .env
+          echo "PORT=3001" >> .env
+          echo "ENABLE_NGROK=true" >> .env
+          echo "CURSOR_ENABLE_VSCODE=true" >> .env
+          
+      - name: Deploy to Replit
+        if: github.event_name == 'push' || (github.event_name == 'repository_dispatch' && github.event.client_payload.source == 'cursor')
+        run: |
+          echo "Deploying latest changes to Replit"
+          
+          # Check if we have Replit credentials
+          if [ -n "${{ secrets.REPLIT_API_KEY }}" ]; then
+            # Generate deployment script with timestamps
+            DEPLOY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            echo "// Replit deployment script - $DEPLOY_TIME" > deploy-replit.js
+            echo "console.log('Deploying to Replit at $DEPLOY_TIME');" >> deploy-replit.js
+            echo "// Last update from: ${{ github.event_name }}" >> deploy-replit.js
+            
+            # Add event data if available
+            if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+              echo "// Source: ${{ github.event.client_payload.source }}" >> deploy-replit.js
+              echo "// Event: ${{ github.event.client_payload.event }}" >> deploy-replit.js
+            fi
+            
+            echo "Deployment script created for Replit"
+            
+            # In a real scenario, you would push to Replit here
+            # This is a placeholder for the actual deployment command
+            node -e "console.log('Replit deployment would happen here');"
+          else
+            echo "Skipping Replit deployment due to missing credentials"
+          fi
+          
+      - name: Sync to Cursor AI
+        if: github.event_name == 'push' || (github.event_name == 'repository_dispatch' && github.event.client_payload.source == 'replit')
+        run: |
+          echo "Syncing latest changes to Cursor AI environment"
+          
+          # Check if we have Cursor credentials
+          if [ -n "${{ secrets.CURSOR_AI_API_KEY }}" ]; then
+            # Generate deployment script with timestamps
+            DEPLOY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            echo "// Cursor AI sync script - $DEPLOY_TIME" > sync-cursor.js
+            echo "console.log('Syncing to Cursor AI at $DEPLOY_TIME');" >> sync-cursor.js
+            echo "// Last update from: ${{ github.event_name }}" >> sync-cursor.js
+            
+            # Add event data if available
+            if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+              echo "// Source: ${{ github.event.client_payload.source }}" >> sync-cursor.js
+              echo "// Event: ${{ github.event.client_payload.event }}" >> sync-cursor.js
+            fi
+            
+            echo "Sync script created for Cursor AI"
+            
+            # In a real scenario, you would sync to Cursor AI here
+            # This is a placeholder for the actual sync command
+            node -e "console.log('Cursor AI sync would happen here');"
+          else 
+            echo "Skipping Cursor AI sync due to missing credentials"
+          fi 
